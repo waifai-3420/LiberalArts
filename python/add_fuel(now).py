@@ -411,8 +411,26 @@ class Game:
         self.vehicles = []
         self.selected_node = None
         self.route_planning_nodes = []
+        
+        # ランキング機能
+        self.high_scores = []  # スコアを記録する配列（降順に保存）
+        self.max_rankings = 10  # 最大10個のスコアを保存
 
         self.setup_game()
+
+    def add_score_to_ranking(self, score):
+        """スコアをランキングに追加する"""
+        # スコアを配列に追加
+        self.high_scores.append(score)
+        
+        # 降順でソート
+        self.high_scores.sort(reverse=True)
+        
+        # 配列のサイズが上限を超える場合、最小値を削除
+        if len(self.high_scores) > self.max_rankings:
+            self.high_scores.pop()  # 最後の要素（最小値）を削除
+        
+        print(f"スコア {score} をランキングに追加しました。")
 
     def load_assets(self):
         try:
@@ -597,6 +615,12 @@ class Game:
                     ##    vehicle.score += fuel_bonus
                     ##   print(f"燃料ボーナス: +{fuel_bonus}点 (残り燃料: {int(fuel_saved)})")
                     ##    print(f"最終スコア: {vehicle.score}点")
+                
+                # スコアをランキングに追加
+                if self.vehicles:
+                    final_score = self.vehicles[0].score
+                    self.add_score_to_ranking(final_score)
+                
                 self.game_state = 'RESULTS'
 
     def draw(self):
@@ -662,6 +686,9 @@ class Game:
             score_text = self.font.render(f"Score: {vehicle.score}", True, BLACK)
             self.screen.blit(score_text, (10, 200))
         
+        # ランキング表示（画面右上）
+        self.draw_ranking()
+        
         # 燃料情報を表示
         if self.vehicles:
             vehicle = self.vehicles[0]
@@ -710,6 +737,35 @@ class Game:
                 self.screen.blit(results_text, (SCREEN_WIDTH // 2 - results_text.get_width() // 2, SCREEN_HEIGHT // 2))
                 reset_prompt = self.font.render("Press R to play again.", True, GREEN)
                 self.screen.blit(reset_prompt, (SCREEN_WIDTH // 2 - reset_prompt.get_width() // 2, SCREEN_HEIGHT // 2 + 40))
+
+    def draw_ranking(self):
+        """ランキングを画面右上に表示する"""
+        if not self.high_scores:
+            return
+        
+        # ランキング表示の位置設定
+        ranking_x = SCREEN_WIDTH - 250
+        ranking_y = 10
+        
+        # タイトル表示
+        ranking_font = pygame.font.Font(None, 28)
+        title_text = ranking_font.render("HIGH SCORES", True, BLACK)
+        self.screen.blit(title_text, (ranking_x, ranking_y))
+        
+        # ランキング背景の描画
+        ranking_height = len(self.high_scores) * 25 + 40
+        pygame.draw.rect(self.screen, (240, 240, 240), 
+                        (ranking_x - 10, ranking_y - 5, 240, ranking_height), 0)
+        pygame.draw.rect(self.screen, BLACK, 
+                        (ranking_x - 10, ranking_y - 5, 240, ranking_height), 2)
+        
+        # 各スコアを表示
+        score_font = pygame.font.Font(None, 24)
+        for i, score in enumerate(self.high_scores):
+            rank = i + 1
+            score_text = score_font.render(f"{rank:2d}. {score:4d} pts", True, BLACK)
+            y_pos = ranking_y + 30 + i * 25
+            self.screen.blit(score_text, (ranking_x, y_pos))
 
     def run(self):
         running = True
