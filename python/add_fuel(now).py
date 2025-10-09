@@ -218,6 +218,12 @@ class Vehicle:
             print("燃料切れのため、新しいルートを設定できません。")
             return
         
+        # 現在のノードから移動可能かどうかをチェック
+        if self.check_if_stranded():
+            print("燃料不足で移動できません。ゲームを終了してください。")
+            self.out_of_fuel = True
+            return
+        
         # 選択されたノードのリストを保存
         self.selected_nodes = node_id_list.copy()
             
@@ -299,8 +305,35 @@ class Vehicle:
                 self.current_highlighted_edge.is_highlighted = False
                 self.current_highlighted_edge = None
 
+    def check_if_stranded(self):
+        """現在のノードから移動可能かどうかをチェック"""
+        if self.out_of_fuel:
+            return True
+            
+        # 現在のノードから隣接するノードへの最短距離を取得
+        current_node_id = self.current_node.id
+        neighbors = game_graph.get_neighbors(current_node_id)
+        
+        if not neighbors:
+            return True  # 隣接ノードがない場合は動けない
+        
+        # 最短距離を計算
+        min_distance = float('infinity')
+        for neighbor_id in neighbors:
+            edge = game_graph.get_edge_between(current_node_id, neighbor_id)
+            if edge and edge.distance < min_distance:
+                min_distance = edge.distance
+        
+        # 燃料が最短距離よりも少ない場合は動けない
+        return self.fuel < min_distance
+
     def update(self):
         if not self.is_moving:
+            # 移動していない時に燃料切れをチェック
+            if not self.out_of_fuel and self.check_if_stranded():
+                self.out_of_fuel = True
+                print(f"車両 {self.id} が燃料不足で動けなくなりました。")
+                return
             return
 
         current_dist_to_target = ((self.target_x - self.x)**2 + (self.target_y - self.y)**2)**0.5
@@ -602,25 +635,29 @@ class Game:
             for vehicle in self.vehicles:
                 vehicle.update()
             
-            all_vehicles_idle = all(not v.is_moving for v in self.vehicles)
-            if all_vehicles_idle:
-                if any(v.out_of_fuel for v in self.vehicles):
-                    print("燃料切れのため配送が中断されました。")
-                else:
-                    print("配送完了！")
-                     # ゲーム終了時の燃料ボーナス計算
-                    ##for vehicle in self.vehicles:
-                    ##    fuel_saved = max(0, vehicle.fuel)
-                    ##    fuel_bonus = int(fuel_saved)
-                    ##    vehicle.score += fuel_bonus
-                    ##   print(f"燃料ボーナス: +{fuel_bonus}点 (残り燃料: {int(fuel_saved)})")
-                    ##    print(f"最終スコア: {vehicle.score}点")
-                
-                # スコアをランキングに追加
+            # 車両が燃料不足で動けなくなった場合の即座のチェック
+            if any(v.out_of_fuel for v in self.vehicles):
+                print("燃料切れのため配送が中断されました。")
                 if self.vehicles:
                     final_score = self.vehicles[0].score
                     self.add_score_to_ranking(final_score)
-                
+                self.game_state = 'RESULTS'
+                return
+            
+            all_vehicles_idle = all(not v.is_moving for v in self.vehicles)
+            if all_vehicles_idle:
+                print("配送完了！")
+                # ゲーム終了時の燃料ボーナス計算
+                ##for vehicle in self.vehicles:
+                ##    fuel_saved = max(0, vehicle.fuel)
+                ##    fuel_bonus = int(fuel_saved)
+                ##    vehicle.score += fuel_bonus
+                ##   print(f"燃料ボーナス: +{fuel_bonus}点 (残り燃料: {int(fuel_saved)})")
+                ##    print(f"最終スコア: {vehicle.score}点")
+                # スコアをランキングに追加
+                #   if self.vehicles:
+                #       final_score = self.vehicles[0].score
+                #       self.add_score_to_ranking(final_score)
                 self.game_state = 'RESULTS'
 
     def draw(self):
@@ -723,6 +760,13 @@ class Game:
             help_text_2 = self.font.render("Press SPACE to start delivery. Press R to Reset.", True, BLACK)
             self.screen.blit(help_text_1, (10, 50))
             self.screen.blit(help_text_2, (10, 90))
+            
+            # 燃料不足の警告表示
+            if self.vehicles and self.vehicles[0].check_if_stranded():
+                warning_text = self.font.render("WARNING: Not enough fuel to move!", True, RED)
+                self.screen.blit(warning_text, (10, 240))
+                warning_text2 = self.font.render("Press R to reset and get more fuel.", True, RED)
+                self.screen.blit(warning_text2, (10, 270))
         elif self.game_state == 'DELIVERING':
             delivering_text = self.font.render("Delivering... Please wait.", True, BLACK)
             self.screen.blit(delivering_text, (10, 50))
