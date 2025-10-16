@@ -43,7 +43,7 @@ class Node:
         self.visited = False  # 訪問済みフラグ
         # 配達希望時間（8-18の整数）。指定がなければランダムで割り当て
         if time_hour is None:
-            self.time_hour = random.randint(8, 18)
+            self.time_hour = random.randint(9, 18)
         else:
             self.time_hour = time_hour
 
