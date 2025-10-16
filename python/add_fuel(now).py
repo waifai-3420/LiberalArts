@@ -96,7 +96,7 @@ class Node:
         except Exception:
             current_hour = 8
 
-        time_font = pygame.font.Font(None, 14)
+        time_font = pygame.font.Font(None, 23)
         hour_text_color = BLACK
         # 未配達かつ時間を過ぎている場合は赤で表示
         if not self.visited and self.time_hour < current_hour:
