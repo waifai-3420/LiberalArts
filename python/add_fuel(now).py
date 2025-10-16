@@ -530,10 +530,19 @@ class Game:
         
         if warehouse_node:
             self.vehicles.append(Vehicle(101, warehouse_node, vehicle_image=self.vehicle_image)) # 画像を渡す
+            # ゲーム開始時に車両の現在位置を選択状態にする
+            self.route_planning_nodes = [warehouse_node.id]
+            warehouse_node.is_selected = True
+            self.selected_node = warehouse_node
         else:
             print("Warning: No warehouse node found. Vehicle starting at node 1 (if exists).")
             if 1 in self.graph.nodes:
                 self.vehicles.append(Vehicle(101, self.graph.nodes[1], vehicle_image=self.vehicle_image))
+                # ノード1を初期選択状態にする
+                start_node = self.graph.nodes[1]
+                self.route_planning_nodes = [start_node.id]
+                start_node.is_selected = True
+                self.selected_node = start_node
             else:
                 print("Error: No nodes available to place vehicle.")
 
@@ -570,6 +579,12 @@ class Game:
                         # スコアをリセット
                         self.vehicles[0].score = 0
                         self.vehicles[0].selected_nodes = []
+                        
+                        # ルート選択を車両の現在位置から開始
+                        self.route_planning_nodes = [warehouse_node.id]
+                        warehouse_node.is_selected = True
+                        self.selected_node = warehouse_node
+                        
                         print("ゲームリセット！プランニングモードに戻ります。")
                         
         if self.game_state == 'PLANNING':
@@ -773,6 +788,21 @@ class Game:
         elif self.game_state == 'RESULTS':
             if self.vehicles and not self.vehicles[0].out_of_fuel:
                 self.game_state = 'PLANNING'
+                
+                # 全ノードの選択状態をリセット
+                for node in self.graph.nodes.values():
+                    node.is_selected = False
+                
+                # 車両の現在位置を選択状態にする
+                current_node = self.vehicles[0].current_node
+                if current_node:
+                    self.route_planning_nodes = [current_node.id]
+                    current_node.is_selected = True
+                    self.selected_node = current_node
+                else:
+                    self.route_planning_nodes = []
+                    self.selected_node = None
+                
                 return  # ここで早期リターンして描画をスキップ
             else:
                 vehicle = self.vehicles[0] if self.vehicles else None
