@@ -26,7 +26,7 @@ LIGHT_GREY = (200, 200, 200)
 
 # --- グラフ関連クラス (簡略化) ---
 class Node:
-    def __init__(self, id, x, y, node_type='city'):
+    def __init__(self, id, x, y, node_type='city', time_hour=None):
         self.id = id
         self.x = x
         self.y = y
@@ -41,6 +41,11 @@ class Node:
         else:  # city
             self.score = random.randint(20, 100)  # 都市ノードは20-100点
         self.visited = False  # 訪問済みフラグ
+        # 配達希望時間（8-18の整数）。指定がなければランダムで割り当て
+        if time_hour is None:
+            self.time_hour = random.randint(8, 18)
+        else:
+            self.time_hour = time_hour
 
     def load_image_for_type(self, node_type):
         try:
@@ -84,6 +89,22 @@ class Node:
             score_text = score_font.render(f"{self.score}pt", True, ORANGE)
             score_rect = score_text.get_rect(center=(self.x, self.y + NODE_RADIUS + 25))
             screen.blit(score_text, score_rect)
+        
+        # 希望配達時間を表示（ノード上）
+        try:
+            current_hour = game.current_hour if 'game' in globals() else 8
+        except Exception:
+            current_hour = 8
+
+        time_font = pygame.font.Font(None, 14)
+        hour_text_color = BLACK
+        # 未配達かつ時間を過ぎている場合は赤で表示
+        if not self.visited and self.time_hour < current_hour:
+            hour_text_color = RED
+
+        time_text = time_font.render(f"{self.time_hour}:00", True, hour_text_color)
+        time_rect = time_text.get_rect(center=(self.x, self.y - NODE_RADIUS - 12))
+        screen.blit(time_text, time_rect)
 
 class Edge:
     def __init__(self, node1, node2, distance):
@@ -343,8 +364,15 @@ class Vehicle:
             self.x, self.y = self.target_x, self.target_y
             arrived_node = game_graph.nodes[self.path_nodes_ids[self.path_index + 1]]
             self.current_node = arrived_node
-            
-            # スコア計算：選択されたノードに到達した場合
+
+            # 時間を進め、時間ボーナスと18時判定を行う（visited判定はadvance_time内部では行わない）
+            try:
+                if 'game' in globals():
+                    game.advance_time(arrived_node, self)
+            except Exception as e:
+                print("時間進行処理でエラー:", e)
+
+            # スコア計算：選択されたノードに到達した場合（visitedフラグはここで設定）
             if arrived_node.id in self.selected_nodes and not arrived_node.visited:
                 self.score += arrived_node.score
                 arrived_node.visited = True
@@ -436,6 +464,11 @@ class Game:
 
         self.game_state = 'PLANNING' # PLANNING, DELIVERING, RESULTS
 
+        # 時刻管理（8時から開始）
+        self.start_hour = 8
+        self.current_hour = self.start_hour
+        self.end_hour = 18
+
         self.edge_image = None
         self.vehicle_image = None # 車両画像を保持する変数
 
@@ -450,6 +483,34 @@ class Game:
         self.max_rankings = 10  # 最大10個のスコアを保存
 
         self.setup_game()
+
+        # グローバル参照用（NodeやVehicleから呼び出すため）
+        global game
+        game = self
+
+    def advance_time(self, arrived_node, vehicle):
+        """ノード通過毎に時間を1時間進める。ボーナス判定と18時到達時の終了処理を行う"""
+        # 1時間経過
+        self.current_hour += 1
+        print(f"時刻が進みました: {self.current_hour}:00")
+
+        # 到着時のボーナス判定（到着したノードが選択対象かつ未訪問で、時刻が一致する場合）
+        try:
+            if arrived_node and (arrived_node.id in vehicle.selected_nodes) and (not arrived_node.visited):
+                if self.current_hour == arrived_node.time_hour:
+                    vehicle.score += 50
+                    print(f"時間ボーナス獲得！ +50pt (ノード{arrived_node.id}) 現在スコア: {vehicle.score}")
+        except Exception as e:
+            print("advance_time ボーナス判定でエラー:", e)
+
+        # 18時到達判定: 18時になった時点でゲーム終了
+        if self.current_hour >= self.end_hour:
+            print("18:00になりました。ゲームを終了します。")
+            # ランキング登録
+            if self.vehicles:
+                final_score = self.vehicles[0].score
+                self.add_score_to_ranking(final_score)
+            self.game_state = 'RESULTS'
 
     def add_score_to_ranking(self, score):
         """スコアをランキングに追加する"""
@@ -731,6 +792,12 @@ class Game:
     def draw_ui(self):
         state_text = self.font.render(f"State: {self.game_state}", True, BLACK)
         self.screen.blit(state_text, (10, 10))
+        
+        # 現在時刻を画面右上に表示
+        time_text = self.font.render(f"Time: {self.current_hour}:00", True, BLACK)
+        time_rect = time_text.get_rect()
+        time_rect.topright = (SCREEN_WIDTH - 200, 10)
+        self.screen.blit(time_text, time_rect)
         
         # スコア表示
         if self.vehicles:
