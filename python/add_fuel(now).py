@@ -26,7 +26,7 @@ LIGHT_GREY = (200, 200, 200)
 
 # --- グラフ関連クラス (簡略化) ---
 class Node:
-    def __init__(self, id, x, y, node_type='city'):
+    def __init__(self, id, x, y, node_type='city', time_hour=None):
         self.id = id
         self.x = x
         self.y = y
@@ -41,6 +41,11 @@ class Node:
         else:  # city
             self.score = random.randint(20, 100)  # 都市ノードは20-100点
         self.visited = False  # 訪問済みフラグ
+        # 配達希望時間（8-18の整数）。指定がなければランダムで割り当て
+        if time_hour is None:
+            self.time_hour = random.randint(9, 18)
+        else:
+            self.time_hour = time_hour
 
     def load_image_for_type(self, node_type):
         try:
@@ -84,6 +89,22 @@ class Node:
             score_text = score_font.render(f"{self.score}pt", True, ORANGE)
             score_rect = score_text.get_rect(center=(self.x, self.y + NODE_RADIUS + 25))
             screen.blit(score_text, score_rect)
+        
+        # 希望配達時間を表示（ノード上）
+        try:
+            current_hour = game.current_hour if 'game' in globals() else 8
+        except Exception:
+            current_hour = 8
+
+        time_font = pygame.font.Font(None, 23)
+        hour_text_color = BLACK
+        # 未配達かつ時間を過ぎている場合は赤で表示
+        if not self.visited and self.time_hour < current_hour:
+            hour_text_color = RED
+
+        time_text = time_font.render(f"{self.time_hour}:00", True, hour_text_color)
+        time_rect = time_text.get_rect(center=(self.x, self.y - NODE_RADIUS - 12))
+        screen.blit(time_text, time_rect)
 
 class Edge:
     def __init__(self, node1, node2, distance):
@@ -218,6 +239,12 @@ class Vehicle:
             print("燃料切れのため、新しいルートを設定できません。")
             return
         
+        # 現在のノードから移動可能かどうかをチェック
+        if self.check_if_stranded():
+            print("燃料不足で移動できません。ゲームを終了してください。")
+            self.out_of_fuel = True
+            return
+        
         # 選択されたノードのリストを保存
         self.selected_nodes = node_id_list.copy()
             
@@ -299,8 +326,35 @@ class Vehicle:
                 self.current_highlighted_edge.is_highlighted = False
                 self.current_highlighted_edge = None
 
+    def check_if_stranded(self):
+        """現在のノードから移動可能かどうかをチェック"""
+        if self.out_of_fuel:
+            return True
+            
+        # 現在のノードから隣接するノードへの最短距離を取得
+        current_node_id = self.current_node.id
+        neighbors = game_graph.get_neighbors(current_node_id)
+        
+        if not neighbors:
+            return True  # 隣接ノードがない場合は動けない
+        
+        # 最短距離を計算
+        min_distance = float('infinity')
+        for neighbor_id in neighbors:
+            edge = game_graph.get_edge_between(current_node_id, neighbor_id)
+            if edge and edge.distance < min_distance:
+                min_distance = edge.distance
+        
+        # 燃料が最短距離よりも少ない場合は動けない
+        return self.fuel < min_distance
+
     def update(self):
         if not self.is_moving:
+            # 移動していない時に燃料切れをチェック
+            if not self.out_of_fuel and self.check_if_stranded():
+                self.out_of_fuel = True
+                print(f"車両 {self.id} が燃料不足で動けなくなりました。")
+                return
             return
 
         current_dist_to_target = ((self.target_x - self.x)**2 + (self.target_y - self.y)**2)**0.5
@@ -310,8 +364,15 @@ class Vehicle:
             self.x, self.y = self.target_x, self.target_y
             arrived_node = game_graph.nodes[self.path_nodes_ids[self.path_index + 1]]
             self.current_node = arrived_node
-            
-            # スコア計算：選択されたノードに到達した場合
+
+            # 時間を進め、時間ボーナスと18時判定を行う（visited判定はadvance_time内部では行わない）
+            try:
+                if 'game' in globals():
+                    game.advance_time(arrived_node, self)
+            except Exception as e:
+                print("時間進行処理でエラー:", e)
+
+            # スコア計算：選択されたノードに到達した場合（visitedフラグはここで設定）
             if arrived_node.id in self.selected_nodes and not arrived_node.visited:
                 self.score += arrived_node.score
                 arrived_node.visited = True
@@ -403,6 +464,11 @@ class Game:
 
         self.game_state = 'PLANNING' # PLANNING, DELIVERING, RESULTS
 
+        # 時刻管理（8時から開始）
+        self.start_hour = 8
+        self.current_hour = self.start_hour
+        self.end_hour = 18
+
         self.edge_image = None
         self.vehicle_image = None # 車両画像を保持する変数
 
@@ -411,8 +477,54 @@ class Game:
         self.vehicles = []
         self.selected_node = None
         self.route_planning_nodes = []
+        
+        # ランキング機能
+        self.high_scores = []  # スコアを記録する配列（降順に保存）
+        self.max_rankings = 10  # 最大10個のスコアを保存
 
         self.setup_game()
+
+        # グローバル参照用（NodeやVehicleから呼び出すため）
+        global game
+        game = self
+
+    def advance_time(self, arrived_node, vehicle):
+        """ノード通過毎に時間を1時間進める。ボーナス判定と18時到達時の終了処理を行う"""
+        # 1時間経過
+        self.current_hour += 1
+        print(f"時刻が進みました: {self.current_hour}:00")
+
+        # 到着時のボーナス判定（到着したノードが選択対象かつ未訪問で、時刻が一致する場合）
+        try:
+            if arrived_node and (arrived_node.id in vehicle.selected_nodes) and (not arrived_node.visited):
+                if self.current_hour == arrived_node.time_hour:
+                    vehicle.score += 50
+                    print(f"時間ボーナス獲得！ +50pt (ノード{arrived_node.id}) 現在スコア: {vehicle.score}")
+        except Exception as e:
+            print("advance_time ボーナス判定でエラー:", e)
+
+        # 18時到達判定: 18時になった時点でゲーム終了
+        if self.current_hour >= self.end_hour:
+            print("18:00になりました。ゲームを終了します。")
+            # ランキング登録
+            if self.vehicles:
+                final_score = self.vehicles[0].score
+                self.add_score_to_ranking(final_score)
+            self.game_state = 'RESULTS'
+
+    def add_score_to_ranking(self, score):
+        """スコアをランキングに追加する"""
+        # スコアを配列に追加
+        self.high_scores.append(score)
+        
+        # 降順でソート
+        self.high_scores.sort(reverse=True)
+        
+        # 配列のサイズが上限を超える場合、最小値を削除
+        if len(self.high_scores) > self.max_rankings:
+            self.high_scores.pop()  # 最後の要素（最小値）を削除
+        
+        print(f"スコア {score} をランキングに追加しました。")
 
     def load_assets(self):
         try:
@@ -479,10 +591,19 @@ class Game:
         
         if warehouse_node:
             self.vehicles.append(Vehicle(101, warehouse_node, vehicle_image=self.vehicle_image)) # 画像を渡す
+            # ゲーム開始時に車両の現在位置を選択状態にする
+            self.route_planning_nodes = [warehouse_node.id]
+            warehouse_node.is_selected = True
+            self.selected_node = warehouse_node
         else:
             print("Warning: No warehouse node found. Vehicle starting at node 1 (if exists).")
             if 1 in self.graph.nodes:
                 self.vehicles.append(Vehicle(101, self.graph.nodes[1], vehicle_image=self.vehicle_image))
+                # ノード1を初期選択状態にする
+                start_node = self.graph.nodes[1]
+                self.route_planning_nodes = [start_node.id]
+                start_node.is_selected = True
+                self.selected_node = start_node
             else:
                 print("Error: No nodes available to place vehicle.")
 
@@ -492,6 +613,7 @@ class Game:
     def handle_input(self, event):
         if event.type == pygame.KEYDOWN and event.key == pygame.K_r:
             self.game_state = 'PLANNING'
+            self.current_hour = 8
             for node in self.graph.nodes.values():
                 node.is_selected = False
                 node.visited = False  # 訪問状態をリセット
@@ -519,6 +641,12 @@ class Game:
                         # スコアをリセット
                         self.vehicles[0].score = 0
                         self.vehicles[0].selected_nodes = []
+                        
+                        # ルート選択を車両の現在位置から開始
+                        self.route_planning_nodes = [warehouse_node.id]
+                        warehouse_node.is_selected = True
+                        self.selected_node = warehouse_node
+                        
                         print("ゲームリセット！プランニングモードに戻ります。")
                         
         if self.game_state == 'PLANNING':
@@ -584,19 +712,29 @@ class Game:
             for vehicle in self.vehicles:
                 vehicle.update()
             
+            # 車両が燃料不足で動けなくなった場合の即座のチェック
+            if any(v.out_of_fuel for v in self.vehicles):
+                print("燃料切れのため配送が中断されました。")
+                if self.vehicles:
+                    final_score = self.vehicles[0].score
+                    self.add_score_to_ranking(final_score)
+                self.game_state = 'RESULTS'
+                return
+            
             all_vehicles_idle = all(not v.is_moving for v in self.vehicles)
             if all_vehicles_idle:
-                if any(v.out_of_fuel for v in self.vehicles):
-                    print("燃料切れのため配送が中断されました。")
-                else:
-                    print("配送完了！")
-                     # ゲーム終了時の燃料ボーナス計算
-                    ##for vehicle in self.vehicles:
-                    ##    fuel_saved = max(0, vehicle.fuel)
-                    ##    fuel_bonus = int(fuel_saved)
-                    ##    vehicle.score += fuel_bonus
-                    ##   print(f"燃料ボーナス: +{fuel_bonus}点 (残り燃料: {int(fuel_saved)})")
-                    ##    print(f"最終スコア: {vehicle.score}点")
+                print("配送完了！")
+                # ゲーム終了時の燃料ボーナス計算
+                ##for vehicle in self.vehicles:
+                ##    fuel_saved = max(0, vehicle.fuel)
+                ##    fuel_bonus = int(fuel_saved)
+                ##    vehicle.score += fuel_bonus
+                ##   print(f"燃料ボーナス: +{fuel_bonus}点 (残り燃料: {int(fuel_saved)})")
+                ##    print(f"最終スコア: {vehicle.score}点")
+                # スコアをランキングに追加
+                #   if self.vehicles:
+                #       final_score = self.vehicles[0].score
+                #       self.add_score_to_ranking(final_score)
                 self.game_state = 'RESULTS'
 
     def draw(self):
@@ -656,11 +794,20 @@ class Game:
         state_text = self.font.render(f"State: {self.game_state}", True, BLACK)
         self.screen.blit(state_text, (10, 10))
         
+        # 現在時刻を画面右上に表示
+        time_text = self.font.render(f"Time: {self.current_hour}:00", True, BLACK)
+        time_rect = time_text.get_rect()
+        time_rect.topright = (SCREEN_WIDTH - 600, 10)
+        self.screen.blit(time_text, time_rect)
+        
         # スコア表示
         if self.vehicles:
             vehicle = self.vehicles[0]
             score_text = self.font.render(f"Score: {vehicle.score}", True, BLACK)
             self.screen.blit(score_text, (10, 200))
+        
+        # ランキング表示（画面右上）
+        self.draw_ranking()
         
         # 燃料情報を表示
         if self.vehicles:
@@ -696,12 +843,34 @@ class Game:
             help_text_2 = self.font.render("Press SPACE to start delivery. Press R to Reset.", True, BLACK)
             self.screen.blit(help_text_1, (10, 50))
             self.screen.blit(help_text_2, (10, 90))
+            
+            # 燃料不足の警告表示
+            if self.vehicles and self.vehicles[0].check_if_stranded():
+                warning_text = self.font.render("WARNING: Not enough fuel to move!", True, RED)
+                self.screen.blit(warning_text, (10, 240))
+                warning_text2 = self.font.render("Press R to reset and get more fuel.", True, RED)
+                self.screen.blit(warning_text2, (10, 270))
         elif self.game_state == 'DELIVERING':
             delivering_text = self.font.render("Delivering... Please wait.", True, BLACK)
             self.screen.blit(delivering_text, (10, 50))
         elif self.game_state == 'RESULTS':
             if self.vehicles and not self.vehicles[0].out_of_fuel:
                 self.game_state = 'PLANNING'
+                
+                # 全ノードの選択状態をリセット
+                for node in self.graph.nodes.values():
+                    node.is_selected = False
+                
+                # 車両の現在位置を選択状態にする
+                current_node = self.vehicles[0].current_node
+                if current_node:
+                    self.route_planning_nodes = [current_node.id]
+                    current_node.is_selected = True
+                    self.selected_node = current_node
+                else:
+                    self.route_planning_nodes = []
+                    self.selected_node = None
+                
                 return  # ここで早期リターンして描画をスキップ
             else:
                 vehicle = self.vehicles[0] if self.vehicles else None
@@ -710,6 +879,35 @@ class Game:
                 self.screen.blit(results_text, (SCREEN_WIDTH // 2 - results_text.get_width() // 2, SCREEN_HEIGHT // 2))
                 reset_prompt = self.font.render("Press R to play again.", True, GREEN)
                 self.screen.blit(reset_prompt, (SCREEN_WIDTH // 2 - reset_prompt.get_width() // 2, SCREEN_HEIGHT // 2 + 40))
+
+    def draw_ranking(self):
+        """ランキングを画面右上に表示する"""
+        if not self.high_scores:
+            return
+        
+        # ランキング表示の位置設定
+        ranking_x = SCREEN_WIDTH - 250
+        ranking_y = 10
+        
+        # タイトル表示
+        ranking_font = pygame.font.Font(None, 28)
+        title_text = ranking_font.render("HIGH SCORES", True, BLACK)
+        self.screen.blit(title_text, (ranking_x, ranking_y))
+        
+        # ランキング背景の描画
+        ranking_height = len(self.high_scores) * 25 + 40
+        pygame.draw.rect(self.screen, (240, 240, 240), 
+                        (ranking_x - 10, ranking_y - 5, 240, ranking_height), 0)
+        pygame.draw.rect(self.screen, BLACK, 
+                        (ranking_x - 10, ranking_y - 5, 240, ranking_height), 2)
+        
+        # 各スコアを表示
+        score_font = pygame.font.Font(None, 24)
+        for i, score in enumerate(self.high_scores):
+            rank = i + 1
+            score_text = score_font.render(f"{rank:2d}. {score:4d} pts", True, BLACK)
+            y_pos = ranking_y + 30 + i * 25
+            self.screen.blit(score_text, (ranking_x, y_pos))
 
     def run(self):
         running = True
