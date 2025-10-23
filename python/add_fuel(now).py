@@ -613,6 +613,7 @@ class Game:
     def handle_input(self, event):
         if event.type == pygame.KEYDOWN and event.key == pygame.K_r:
             self.game_state = 'PLANNING'
+            self.current_hour = 8
             for node in self.graph.nodes.values():
                 node.is_selected = False
                 node.visited = False  # 訪問状態をリセット
@@ -796,7 +797,7 @@ class Game:
         # 現在時刻を画面右上に表示
         time_text = self.font.render(f"Time: {self.current_hour}:00", True, BLACK)
         time_rect = time_text.get_rect()
-        time_rect.topright = (SCREEN_WIDTH - 200, 10)
+        time_rect.topright = (SCREEN_WIDTH - 600, 10)
         self.screen.blit(time_text, time_rect)
         
         # スコア表示
