@@ -490,6 +490,9 @@ class Game:
 
         # gasstation使用フラグ
         self.gasstation_used = False
+        
+        # 固定ノード位置情報（初回生成時に保存、以降再利用）
+        self.fixed_node_positions = None  # [(id, x, y, type), ...]
 
         self.edge_image = None
         self.vehicle_image = None # 車両画像を保持する変数
@@ -585,56 +588,39 @@ class Game:
         self.game_state = 'PLANNING'
 
     def generate_random_nodes(self):
-        """ノードをランダムに生成する"""
-        # ノードの総数を10～15個でランダムに決定
-        total_nodes = random.randint(10, 15)
-        
-        # 配置領域（画面中央寄り）
-        margin = 150
-        min_x = margin
-        max_x = SCREEN_WIDTH - margin
-        min_y = margin
-        max_y = SCREEN_HEIGHT - margin
-        
-        # ノード間の最小距離
-        min_distance = 80
-        
-        nodes_positions = []
-        node_id = 1
-        
-        # warehouse（倉庫）を1つ生成
-        attempts = 0
-        while attempts < 100:
-            x = random.randint(min_x, max_x)
-            y = random.randint(min_y, max_y)
-            # 最初のノードなので配置可能
-            self.graph.add_node(Node(node_id, x, y, 'warehouse', time_hour=None))
-            nodes_positions.append((x, y))
-            node_id += 1
-            break
-        
-        # gasstation（ガソリンスタンド）を1つ生成
-        attempts = 0
-        while attempts < 100:
-            x = random.randint(min_x, max_x)
-            y = random.randint(min_y, max_y)
-            # 他のノードと重ならないかチェック
-            valid = True
-            for px, py in nodes_positions:
-                dist = ((x - px)**2 + (y - py)**2)**0.5
-                if dist < min_distance:
-                    valid = False
-                    break
-            if valid:
-                self.graph.add_node(Node(node_id, x, y, 'gasstation', time_hour=None))
+        """ノードを生成する（初回はランダム、以降は固定位置を再利用）"""
+        if self.fixed_node_positions is None:
+            # 初回のみランダム生成して位置を保存
+            print("初回ノード生成: ランダムに配置")
+            # ノードの総数を10～15個でランダムに決定
+            total_nodes = random.randint(10, 15)
+            
+            # 配置領域（画面中央寄り）
+            margin = 150
+            min_x = margin
+            max_x = SCREEN_WIDTH - margin
+            min_y = margin
+            max_y = SCREEN_HEIGHT - margin
+            
+            # ノード間の最小距離
+            min_distance = 80
+            
+            nodes_positions = []
+            self.fixed_node_positions = []
+            node_id = 1
+            
+            # warehouse（倉庫）を1つ生成
+            attempts = 0
+            while attempts < 100:
+                x = random.randint(min_x, max_x)
+                y = random.randint(min_y, max_y)
+                # 最初のノードなので配置可能
+                self.fixed_node_positions.append((node_id, x, y, 'warehouse'))
                 nodes_positions.append((x, y))
                 node_id += 1
                 break
-            attempts += 1
-        
-        # 残りのノード（customer と city）を生成
-        remaining_nodes = total_nodes - 2  # warehouse と gasstation を除く
-        for i in range(remaining_nodes):
+            
+            # gasstation（ガソリンスタンド）を1つ生成
             attempts = 0
             while attempts < 100:
                 x = random.randint(min_x, max_x)
@@ -647,22 +633,55 @@ class Game:
                         valid = False
                         break
                 if valid:
-                    # customer と city をランダムに選択
-                    node_type = random.choice(['customer', 'city'])
-                    self.graph.add_node(Node(node_id, x, y, node_type))
+                    self.fixed_node_positions.append((node_id, x, y, 'gasstation'))
                     nodes_positions.append((x, y))
                     node_id += 1
                     break
                 attempts += 1
+            
+            # 残りのノード（customer と city）を生成
+            remaining_nodes = total_nodes - 2  # warehouse と gasstation を除く
+            for i in range(remaining_nodes):
+                attempts = 0
+                while attempts < 100:
+                    x = random.randint(min_x, max_x)
+                    y = random.randint(min_y, max_y)
+                    # 他のノードと重ならないかチェック
+                    valid = True
+                    for px, py in nodes_positions:
+                        dist = ((x - px)**2 + (y - py)**2)**0.5
+                        if dist < min_distance:
+                            valid = False
+                            break
+                    if valid:
+                        # customer と city をランダムに選択
+                        node_type = random.choice(['customer', 'city'])
+                        self.fixed_node_positions.append((node_id, x, y, node_type))
+                        nodes_positions.append((x, y))
+                        node_id += 1
+                        break
+                    attempts += 1
+        else:
+            print("固定位置でノード再生成")
         
-        print(f"ランダムノード生成完了: {len(self.graph.nodes)}個のノード")
+        # 固定位置を使ってノードを生成
+        for node_id, x, y, node_type in self.fixed_node_positions:
+            if node_type in ['warehouse', 'gasstation']:
+                self.graph.add_node(Node(node_id, x, y, node_type, time_hour=None))
+            else:
+                self.graph.add_node(Node(node_id, x, y, node_type))
+        
+        print(f"ノード生成完了: {len(self.graph.nodes)}個のノード")
 
     def generate_random_edges(self):
-        """エッジをランダムに生成（距離30～100、連結性保証）"""
+        """エッジをランダムに生成（連結性保証、各ノードに複数の選択肢）"""
         node_ids = list(self.graph.nodes.keys())
+        max_edges_per_node = max(1, len(node_ids) // 2)  # 各ノードの最大エッジ数
         
-        # すべての可能なエッジを生成し、距離が30～100の範囲内のものを抽出
-        possible_edges = []
+        # すべての可能なエッジを生成
+        all_edges = []
+        preferred_edges = []  # 距離30～100の範囲内のエッジ
+        
         for i in range(len(node_ids)):
             for j in range(i + 1, len(node_ids)):
                 n1_id = node_ids[i]
@@ -670,11 +689,13 @@ class Game:
                 node1 = self.graph.nodes[n1_id]
                 node2 = self.graph.nodes[n2_id]
                 distance = ((node1.x - node2.x)**2 + (node1.y - node2.y)**2)**0.5
+                all_edges.append((n1_id, n2_id, distance))
                 if 30 <= distance <= 100:
-                    possible_edges.append((n1_id, n2_id, distance))
+                    preferred_edges.append((n1_id, n2_id, distance))
         
         # 距離でソート（短い距離を優先）
-        possible_edges.sort(key=lambda x: x[2])
+        all_edges.sort(key=lambda x: x[2])
+        preferred_edges.sort(key=lambda x: x[2])
         
         # Union-Find（連結性チェック用）
         parent = {node_id: node_id for node_id in node_ids}
@@ -695,31 +716,85 @@ class Game:
         edge_count = {node_id: 0 for node_id in node_ids}
         selected_edges = []
         
-        # まず連結性を確保するため、最小全域木を構築
-        for n1_id, n2_id, distance in possible_edges:
-            if union(n1_id, n2_id):
-                selected_edges.append((n1_id, n2_id, distance))
-                edge_count[n1_id] += 1
-                edge_count[n2_id] += 1
-                # 全ノードが連結されたら終了
-                if len(selected_edges) == len(node_ids) - 1:
-                    break
-        
-        # 追加のエッジを追加（各ノードが最低1本以上のエッジを持つことは既に保証済み）
-        # より豊かなグラフにするため、さらにエッジを追加
-        for n1_id, n2_id, distance in possible_edges:
-            if (n1_id, n2_id, distance) not in selected_edges:
-                # エッジ数を制限（ノード数の1.5倍程度）
-                if len(selected_edges) < len(node_ids) * 1.5:
+        # ステップ1: 距離30～100の範囲で連結性を確保
+        for n1_id, n2_id, distance in preferred_edges:
+            # 両ノードがまだ最大接続数に達していない場合のみ追加
+            if edge_count[n1_id] < max_edges_per_node and edge_count[n2_id] < max_edges_per_node:
+                if union(n1_id, n2_id):
                     selected_edges.append((n1_id, n2_id, distance))
                     edge_count[n1_id] += 1
                     edge_count[n2_id] += 1
+                    # 全ノードが連結されたかチェック
+                    if len(selected_edges) == len(node_ids) - 1:
+                        break
         
-        # エッジをグラフに追加
+        # ステップ2: まだ連結されていない場合、すべてのエッジから追加
+        if len(selected_edges) < len(node_ids) - 1:
+            print(f"警告: 距離30-100の範囲では連結できません。距離制限を緩和します。")
+            for n1_id, n2_id, distance in all_edges:
+                if edge_count[n1_id] < max_edges_per_node and edge_count[n2_id] < max_edges_per_node:
+                    if union(n1_id, n2_id):
+                        selected_edges.append((n1_id, n2_id, distance))
+                        edge_count[n1_id] += 1
+                        edge_count[n2_id] += 1
+                        if len(selected_edges) == len(node_ids) - 1:
+                            break
+        
+        # ステップ3: 各ノードにもっと選択肢を与えるため、追加のエッジを追加
+        # 優先的に30～100の範囲から、各ノードが2～max_edges_per_nodeの接続を持つように
+        min_edges_per_node = 3  # 最低3本の接続を目指す
+        
+        # まずは接続数が少ないノードに優先的にエッジを追加
+        for n1_id, n2_id, distance in preferred_edges:
+            if (n1_id, n2_id, distance) not in selected_edges:
+                # 両ノードがまだ最大接続数に達していない場合
+                if edge_count[n1_id] < max_edges_per_node and edge_count[n2_id] < max_edges_per_node:
+                    # 少なくとも一方が最小接続数未満の場合、または全体的にエッジを増やす
+                    if edge_count[n1_id] < min_edges_per_node or edge_count[n2_id] < min_edges_per_node or len(selected_edges) < len(node_ids) * 2:
+                        selected_edges.append((n1_id, n2_id, distance))
+                        edge_count[n1_id] += 1
+                        edge_count[n2_id] += 1
+        
+        # 接続数が最小値未満のノードがあれば、追加のエッジを強制的に追加
+        for node_id in node_ids:
+            if edge_count[node_id] < min_edges_per_node:
+                # まずpreferred_edges（距離30～100）から探す
+                added = False
+                for n1_id, n2_id, distance in preferred_edges:
+                    if (n1_id, n2_id, distance) not in selected_edges:
+                        if (n1_id == node_id or n2_id == node_id) and edge_count[n1_id] < max_edges_per_node and edge_count[n2_id] < max_edges_per_node:
+                            selected_edges.append((n1_id, n2_id, distance))
+                            edge_count[n1_id] += 1
+                            edge_count[n2_id] += 1
+                            print(f"ノード{node_id}に追加エッジ: {n1_id}-{n2_id} (距離: {int(distance)})")
+                            if edge_count[node_id] >= min_edges_per_node:
+                                added = True
+                                break
+                
+                # preferred_edgesで見つからない場合、all_edgesから探す
+                if not added and edge_count[node_id] < min_edges_per_node:
+                    print(f"警告: ノード{node_id}の接続数が不足。距離制限を緩和してエッジを追加します。")
+                    for n1_id, n2_id, distance in all_edges:
+                        if (n1_id, n2_id, distance) not in selected_edges:
+                            if (n1_id == node_id or n2_id == node_id) and edge_count[n1_id] < max_edges_per_node and edge_count[n2_id] < max_edges_per_node:
+                                selected_edges.append((n1_id, n2_id, distance))
+                                edge_count[n1_id] += 1
+                                edge_count[n2_id] += 1
+                                print(f"ノード{node_id}に追加エッジ（制限外）: {n1_id}-{n2_id} (距離: {int(distance)})")
+                                if edge_count[node_id] >= min_edges_per_node:
+                                    break
+        
+        # エッジをグラフに追加（距離を10～100の範囲でランダムに設定）
         for n1_id, n2_id, distance in selected_edges:
-            self.graph.add_edge(n1_id, n2_id, distance)
+            random_distance = random.randint(10, 100)
+            self.graph.add_edge(n1_id, n2_id, random_distance)
         
-        print(f"ランダムエッジ生成完了: {len(self.graph.edges)}本のエッジ")
+        # 統計情報を出力
+        min_conn = min(edge_count.values())
+        max_conn = max(edge_count.values())
+        avg_conn = sum(edge_count.values()) / len(edge_count)
+        print(f"ランダムエッジ生成完了: {len(self.graph.edges)}本のエッジ、{len(node_ids)}個のノード")
+        print(f"接続数 - 最小: {min_conn}, 最大: {max_conn}, 平均: {avg_conn:.1f}")
 
     def load_assets(self):
         try:
@@ -783,6 +858,9 @@ class Game:
             self.current_day = 1
             self.cumulative_score = 0
             self.gasstation_used = False
+            
+            # 固定ノード位置をリセット（次回は新しいランダム位置で生成）
+            self.fixed_node_positions = None
             
             # 新しいマップを生成
             self.setup_game()
