@@ -593,7 +593,7 @@ class Game:
             # 初回のみランダム生成して位置を保存
             print("初回ノード生成: ランダムに配置")
             # ノードの総数を10～15個でランダムに決定
-            total_nodes = random.randint(10, 15)
+            total_nodes = random.randint(10, 10)
             
             # 配置領域（画面中央寄り）
             margin = 150
@@ -786,7 +786,7 @@ class Game:
         
         # エッジをグラフに追加（距離を10～100の範囲でランダムに設定）
         for n1_id, n2_id, distance in selected_edges:
-            random_distance = random.randint(10, 100)
+            random_distance = random.randint(100, 200)
             self.graph.add_edge(n1_id, n2_id, random_distance)
         
         # 統計情報を出力
@@ -1011,7 +1011,7 @@ class Game:
         self.screen.blit(state_text, (10, 10))
         
         # 日数と現在時刻を画面右上に表示
-        day_time_text = self.font.render(f"{self.current_day}日目 {self.current_hour}:00", True, BLACK)
+        day_time_text = self.font.render(f"day {self.current_day} {self.current_hour}:00", True, BLACK)
         day_time_rect = day_time_text.get_rect()
         day_time_rect.topright = (SCREEN_WIDTH - 600, 10)
         self.screen.blit(day_time_text, day_time_rect)
