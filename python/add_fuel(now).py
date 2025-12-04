@@ -26,7 +26,7 @@ LIGHT_GREY = (200, 200, 200)
 
 # --- グラフ関連クラス (簡略化) ---
 class Node:
-    def __init__(self, id, x, y, node_type='city'):
+    def __init__(self, id, x, y, node_type='city', time_hour=None):
         self.id = id
         self.x = x
         self.y = y
@@ -35,12 +35,22 @@ class Node:
         self.image = self.load_image_for_type(node_type)
         # スコア設定
         if node_type == 'customer':
-            self.score = random.randint(50, 200)  # 顧客ノードは50-200点
+            self.score = random.randint(100, 200)  # 顧客ノードは100-200点
         elif node_type == 'warehouse':
             self.score = 0  # 倉庫は0点
+        elif node_type == 'gasstation':
+            self.score = 0  # ガソリンスタンドは0点
         else:  # city
-            self.score = random.randint(20, 100)  # 都市ノードは20-100点
+            self.score = random.randint(100, 200)  # 都市ノードも100-200点
         self.visited = False  # 訪問済みフラグ
+        # 配達希望時間（8-18の整数）。指定がなければランダムで割り当て
+        if time_hour is None:
+            if node_type in ['warehouse', 'gasstation']:
+                self.time_hour = None  # warehouse と gasstation には配達時間を設定しない
+            else:
+                self.time_hour = random.randint(9, 18)
+        else:
+            self.time_hour = time_hour
 
     def load_image_for_type(self, node_type):
         try:
@@ -49,6 +59,8 @@ class Node:
                 return pygame.image.load('assets/warehouse_icon.png').convert_alpha()
             elif node_type == 'customer':
                 return pygame.image.load('assets/customer_icon.png').convert_alpha()
+            elif node_type == 'gasstation':
+                return pygame.image.load('assets/gasstation_icon.png').convert_alpha()
             else: # 'city' or default
                 return pygame.image.load('assets/city_icon.png').convert_alpha()
         except pygame.error:
@@ -84,6 +96,23 @@ class Node:
             score_text = score_font.render(f"{self.score}pt", True, ORANGE)
             score_rect = score_text.get_rect(center=(self.x, self.y + NODE_RADIUS + 25))
             screen.blit(score_text, score_rect)
+        
+        # 希望配達時間を表示（ノード上）
+        try:
+            current_hour = game.current_hour if 'game' in globals() else 8
+        except Exception:
+            current_hour = 8
+
+        time_font = pygame.font.Font(None, 23)
+        hour_text_color = BLACK
+        # 未配達かつ時間を過ぎている場合は赤で表示
+        if self.time_hour is not None:
+            if not self.visited and self.time_hour < current_hour:
+                hour_text_color = RED
+
+            time_text = time_font.render(f"{self.time_hour}:00", True, hour_text_color)
+            time_rect = time_text.get_rect(center=(self.x, self.y - NODE_RADIUS - 12))
+            screen.blit(time_text, time_rect)
 
 class Edge:
     def __init__(self, node1, node2, distance):
@@ -218,6 +247,12 @@ class Vehicle:
             print("燃料切れのため、新しいルートを設定できません。")
             return
         
+        # 現在のノードから移動可能かどうかをチェック
+        if self.check_if_stranded():
+            print("燃料不足で移動できません。ゲームを終了してください。")
+            self.out_of_fuel = True
+            return
+        
         # 選択されたノードのリストを保存
         self.selected_nodes = node_id_list.copy()
             
@@ -299,8 +334,35 @@ class Vehicle:
                 self.current_highlighted_edge.is_highlighted = False
                 self.current_highlighted_edge = None
 
+    def check_if_stranded(self):
+        """現在のノードから移動可能かどうかをチェック"""
+        if self.out_of_fuel:
+            return True
+            
+        # 現在のノードから隣接するノードへの最短距離を取得
+        current_node_id = self.current_node.id
+        neighbors = game_graph.get_neighbors(current_node_id)
+        
+        if not neighbors:
+            return True  # 隣接ノードがない場合は動けない
+        
+        # 最短距離を計算
+        min_distance = float('infinity')
+        for neighbor_id in neighbors:
+            edge = game_graph.get_edge_between(current_node_id, neighbor_id)
+            if edge and edge.distance < min_distance:
+                min_distance = edge.distance
+        
+        # 燃料が最短距離よりも少ない場合は動けない
+        return self.fuel < min_distance
+
     def update(self):
         if not self.is_moving:
+            # 移動していない時に燃料切れをチェック
+            if not self.out_of_fuel and self.check_if_stranded():
+                self.out_of_fuel = True
+                print(f"車両 {self.id} が燃料不足で動けなくなりました。")
+                return
             return
 
         current_dist_to_target = ((self.target_x - self.x)**2 + (self.target_y - self.y)**2)**0.5
@@ -310,8 +372,22 @@ class Vehicle:
             self.x, self.y = self.target_x, self.target_y
             arrived_node = game_graph.nodes[self.path_nodes_ids[self.path_index + 1]]
             self.current_node = arrived_node
-            
-            # スコア計算：選択されたノードに到達した場合
+
+            # 時間を進め、時間ボーナスと18時判定を行う（visited判定はadvance_time内部では行わない）
+            try:
+                if 'game' in globals():
+                    game.advance_time(arrived_node, self)
+            except Exception as e:
+                print("時間進行処理でエラー:", e)
+
+            # gasstationでの給油処理（1回のみ）
+            if arrived_node.type == 'gasstation' and not game.gasstation_used:
+                old_fuel = self.fuel
+                self.fuel = INITIAL_FUEL
+                game.gasstation_used = True
+                print(f"ガソリンスタンドで給油！ 燃料: {int(old_fuel)} → {int(self.fuel)}")
+
+            # スコア計算：選択されたノードに到達した場合（visitedフラグはここで設定）
             if arrived_node.id in self.selected_nodes and not arrived_node.visited:
                 self.score += arrived_node.score
                 arrived_node.visited = True
@@ -403,6 +479,21 @@ class Game:
 
         self.game_state = 'PLANNING' # PLANNING, DELIVERING, RESULTS
 
+        # 時刻管理（8時から開始）
+        self.start_hour = 8
+        self.current_hour = self.start_hour
+        self.end_hour = 18
+        
+        # 日数管理
+        self.current_day = 1
+        self.cumulative_score = 0  # 累積スコア
+
+        # gasstation使用フラグ
+        self.gasstation_used = False
+        
+        # 固定ノード位置情報（初回生成時に保存、以降再利用）
+        self.fixed_node_positions = None  # [(id, x, y, type), ...]
+
         self.edge_image = None
         self.vehicle_image = None # 車両画像を保持する変数
 
@@ -411,8 +502,299 @@ class Game:
         self.vehicles = []
         self.selected_node = None
         self.route_planning_nodes = []
+        
+        # ランキング機能
+        self.high_scores = []  # スコアを記録する配列（降順に保存）
+        self.max_rankings = 10  # 最大10個のスコアを保存
 
         self.setup_game()
+
+        # グローバル参照用（NodeやVehicleから呼び出すため）
+        global game
+        game = self
+
+    def advance_time(self, arrived_node, vehicle):
+        """ノード通過毎に時間を1時間進める。ボーナス判定と18時到達時の終了処理を行う"""
+        # 1時間経過
+        self.current_hour += 1
+        print(f"時刻が進みました: {self.current_hour}:00")
+
+        # 到着時のボーナス判定（到着したノードが選択対象かつ未訪問で、時刻が一致する場合）
+        # ボーナススコア: (ノードの時刻 - 8) * 10 （8時で0点、18時で100点）
+        try:
+            if arrived_node and (arrived_node.id in vehicle.selected_nodes) and (not arrived_node.visited):
+                if self.current_hour == arrived_node.time_hour:
+                    time_bonus = (arrived_node.time_hour - 8) * 10
+                    vehicle.score += time_bonus
+                    print(f"時間ボーナス獲得！ +{time_bonus}pt (ノード{arrived_node.id}, {arrived_node.time_hour}:00) 現在スコア: {vehicle.score}")
+        except Exception as e:
+            print("advance_time ボーナス判定でエラー:", e)
+
+        # 18時到達判定: 18時になった時点でゲーム終了
+        if self.current_hour >= self.end_hour:
+            print("18:00になりました。ゲームを終了します。")
+            # ランキング登録
+            if self.vehicles:
+                final_score = self.vehicles[0].score
+                self.add_score_to_ranking(final_score)
+            self.game_state = 'RESULTS'
+
+    def add_score_to_ranking(self, score):
+        """スコアをランキングに追加する"""
+        # スコアを配列に追加
+        self.high_scores.append(score)
+        
+        # 降順でソート
+        self.high_scores.sort(reverse=True)
+        
+        # 配列のサイズが上限を超える場合、最小値を削除
+        if len(self.high_scores) > self.max_rankings:
+            self.high_scores.pop()  # 最後の要素（最小値）を削除
+        
+        print(f"スコア {score} をランキングに追加しました。")
+
+    def check_all_nodes_visited(self):
+        """customer と city ノードが全て訪問済みかチェック"""
+        for node in self.graph.nodes.values():
+            if node.type in ['customer', 'city'] and not node.visited:
+                return False
+        return True
+    
+    def continue_to_next_day(self):
+        """マップ継続：スコア引き継ぎ、日数増加、新マップ生成"""
+        # 累積スコアに加算
+        if self.vehicles:
+            self.cumulative_score += self.vehicles[0].score
+            print(f"累積スコア: {self.cumulative_score}点")
+        
+        # 日数を増やす
+        self.current_day += 1
+        print(f"{self.current_day}日目に進みます！")
+        
+        # 時刻をリセット
+        self.current_hour = self.start_hour
+        
+        # gasstation使用フラグをリセット
+        self.gasstation_used = False
+        
+        # 新しいマップを生成
+        self.setup_game()
+        
+        # 車両のスコアを累積スコアに設定
+        if self.vehicles:
+            self.vehicles[0].score = self.cumulative_score
+        
+        # ゲーム状態をPLANNINGに戻す
+        self.game_state = 'PLANNING'
+
+    def generate_random_nodes(self):
+        """ノードを生成する（初回はランダム、以降は固定位置を再利用）"""
+        if self.fixed_node_positions is None:
+            # 初回のみランダム生成して位置を保存
+            print("初回ノード生成: ランダムに配置")
+            # ノードの総数を10～15個でランダムに決定
+            total_nodes = random.randint(10, 10)
+            
+            # 配置領域（画面中央寄り）
+            margin = 150
+            min_x = margin
+            max_x = SCREEN_WIDTH - margin
+            min_y = margin
+            max_y = SCREEN_HEIGHT - margin
+            
+            # ノード間の最小距離
+            min_distance = 80
+            
+            nodes_positions = []
+            self.fixed_node_positions = []
+            node_id = 1
+            
+            # warehouse（倉庫）を1つ生成
+            attempts = 0
+            while attempts < 100:
+                x = random.randint(min_x, max_x)
+                y = random.randint(min_y, max_y)
+                # 最初のノードなので配置可能
+                self.fixed_node_positions.append((node_id, x, y, 'warehouse'))
+                nodes_positions.append((x, y))
+                node_id += 1
+                break
+            
+            # gasstation（ガソリンスタンド）を1つ生成
+            attempts = 0
+            while attempts < 100:
+                x = random.randint(min_x, max_x)
+                y = random.randint(min_y, max_y)
+                # 他のノードと重ならないかチェック
+                valid = True
+                for px, py in nodes_positions:
+                    dist = ((x - px)**2 + (y - py)**2)**0.5
+                    if dist < min_distance:
+                        valid = False
+                        break
+                if valid:
+                    self.fixed_node_positions.append((node_id, x, y, 'gasstation'))
+                    nodes_positions.append((x, y))
+                    node_id += 1
+                    break
+                attempts += 1
+            
+            # 残りのノード（customer と city）を生成
+            remaining_nodes = total_nodes - 2  # warehouse と gasstation を除く
+            for i in range(remaining_nodes):
+                attempts = 0
+                while attempts < 100:
+                    x = random.randint(min_x, max_x)
+                    y = random.randint(min_y, max_y)
+                    # 他のノードと重ならないかチェック
+                    valid = True
+                    for px, py in nodes_positions:
+                        dist = ((x - px)**2 + (y - py)**2)**0.5
+                        if dist < min_distance:
+                            valid = False
+                            break
+                    if valid:
+                        # customer と city をランダムに選択
+                        node_type = random.choice(['customer', 'city'])
+                        self.fixed_node_positions.append((node_id, x, y, node_type))
+                        nodes_positions.append((x, y))
+                        node_id += 1
+                        break
+                    attempts += 1
+        else:
+            print("固定位置でノード再生成")
+        
+        # 固定位置を使ってノードを生成
+        for node_id, x, y, node_type in self.fixed_node_positions:
+            if node_type in ['warehouse', 'gasstation']:
+                self.graph.add_node(Node(node_id, x, y, node_type, time_hour=None))
+            else:
+                self.graph.add_node(Node(node_id, x, y, node_type))
+        
+        print(f"ノード生成完了: {len(self.graph.nodes)}個のノード")
+
+    def generate_random_edges(self):
+        """エッジをランダムに生成（連結性保証、各ノードに複数の選択肢）"""
+        node_ids = list(self.graph.nodes.keys())
+        max_edges_per_node = max(1, len(node_ids) // 2)  # 各ノードの最大エッジ数
+        
+        # すべての可能なエッジを生成
+        all_edges = []
+        preferred_edges = []  # 距離30～100の範囲内のエッジ
+        
+        for i in range(len(node_ids)):
+            for j in range(i + 1, len(node_ids)):
+                n1_id = node_ids[i]
+                n2_id = node_ids[j]
+                node1 = self.graph.nodes[n1_id]
+                node2 = self.graph.nodes[n2_id]
+                distance = ((node1.x - node2.x)**2 + (node1.y - node2.y)**2)**0.5
+                all_edges.append((n1_id, n2_id, distance))
+                if 30 <= distance <= 100:
+                    preferred_edges.append((n1_id, n2_id, distance))
+        
+        # 距離でソート（短い距離を優先）
+        all_edges.sort(key=lambda x: x[2])
+        preferred_edges.sort(key=lambda x: x[2])
+        
+        # Union-Find（連結性チェック用）
+        parent = {node_id: node_id for node_id in node_ids}
+        
+        def find(x):
+            if parent[x] != x:
+                parent[x] = find(parent[x])
+            return parent[x]
+        
+        def union(x, y):
+            px, py = find(x), find(y)
+            if px != py:
+                parent[px] = py
+                return True
+            return False
+        
+        # 各ノードの接続数をカウント
+        edge_count = {node_id: 0 for node_id in node_ids}
+        selected_edges = []
+        
+        # ステップ1: 距離30～100の範囲で連結性を確保
+        for n1_id, n2_id, distance in preferred_edges:
+            # 両ノードがまだ最大接続数に達していない場合のみ追加
+            if edge_count[n1_id] < max_edges_per_node and edge_count[n2_id] < max_edges_per_node:
+                if union(n1_id, n2_id):
+                    selected_edges.append((n1_id, n2_id, distance))
+                    edge_count[n1_id] += 1
+                    edge_count[n2_id] += 1
+                    # 全ノードが連結されたかチェック
+                    if len(selected_edges) == len(node_ids) - 1:
+                        break
+        
+        # ステップ2: まだ連結されていない場合、すべてのエッジから追加
+        if len(selected_edges) < len(node_ids) - 1:
+            print(f"警告: 距離30-100の範囲では連結できません。距離制限を緩和します。")
+            for n1_id, n2_id, distance in all_edges:
+                if edge_count[n1_id] < max_edges_per_node and edge_count[n2_id] < max_edges_per_node:
+                    if union(n1_id, n2_id):
+                        selected_edges.append((n1_id, n2_id, distance))
+                        edge_count[n1_id] += 1
+                        edge_count[n2_id] += 1
+                        if len(selected_edges) == len(node_ids) - 1:
+                            break
+        
+        # ステップ3: 各ノードにもっと選択肢を与えるため、追加のエッジを追加
+        # 優先的に30～100の範囲から、各ノードが2～max_edges_per_nodeの接続を持つように
+        min_edges_per_node = 3  # 最低3本の接続を目指す
+        
+        # まずは接続数が少ないノードに優先的にエッジを追加
+        for n1_id, n2_id, distance in preferred_edges:
+            if (n1_id, n2_id, distance) not in selected_edges:
+                # 両ノードがまだ最大接続数に達していない場合
+                if edge_count[n1_id] < max_edges_per_node and edge_count[n2_id] < max_edges_per_node:
+                    # 少なくとも一方が最小接続数未満の場合、または全体的にエッジを増やす
+                    if edge_count[n1_id] < min_edges_per_node or edge_count[n2_id] < min_edges_per_node or len(selected_edges) < len(node_ids) * 2:
+                        selected_edges.append((n1_id, n2_id, distance))
+                        edge_count[n1_id] += 1
+                        edge_count[n2_id] += 1
+        
+        # 接続数が最小値未満のノードがあれば、追加のエッジを強制的に追加
+        for node_id in node_ids:
+            if edge_count[node_id] < min_edges_per_node:
+                # まずpreferred_edges（距離30～100）から探す
+                added = False
+                for n1_id, n2_id, distance in preferred_edges:
+                    if (n1_id, n2_id, distance) not in selected_edges:
+                        if (n1_id == node_id or n2_id == node_id) and edge_count[n1_id] < max_edges_per_node and edge_count[n2_id] < max_edges_per_node:
+                            selected_edges.append((n1_id, n2_id, distance))
+                            edge_count[n1_id] += 1
+                            edge_count[n2_id] += 1
+                            print(f"ノード{node_id}に追加エッジ: {n1_id}-{n2_id} (距離: {int(distance)})")
+                            if edge_count[node_id] >= min_edges_per_node:
+                                added = True
+                                break
+                
+                # preferred_edgesで見つからない場合、all_edgesから探す
+                if not added and edge_count[node_id] < min_edges_per_node:
+                    print(f"警告: ノード{node_id}の接続数が不足。距離制限を緩和してエッジを追加します。")
+                    for n1_id, n2_id, distance in all_edges:
+                        if (n1_id, n2_id, distance) not in selected_edges:
+                            if (n1_id == node_id or n2_id == node_id) and edge_count[n1_id] < max_edges_per_node and edge_count[n2_id] < max_edges_per_node:
+                                selected_edges.append((n1_id, n2_id, distance))
+                                edge_count[n1_id] += 1
+                                edge_count[n2_id] += 1
+                                print(f"ノード{node_id}に追加エッジ（制限外）: {n1_id}-{n2_id} (距離: {int(distance)})")
+                                if edge_count[node_id] >= min_edges_per_node:
+                                    break
+        
+        # エッジをグラフに追加（距離を10～100の範囲でランダムに設定）
+        for n1_id, n2_id, distance in selected_edges:
+            random_distance = random.randint(100, 200)
+            self.graph.add_edge(n1_id, n2_id, random_distance)
+        
+        # 統計情報を出力
+        min_conn = min(edge_count.values())
+        max_conn = max(edge_count.values())
+        avg_conn = sum(edge_count.values()) / len(edge_count)
+        print(f"ランダムエッジ生成完了: {len(self.graph.edges)}本のエッジ、{len(node_ids)}個のノード")
+        print(f"接続数 - 最小: {min_conn}, 最大: {max_conn}, 平均: {avg_conn:.1f}")
 
     def load_assets(self):
         try:
@@ -426,50 +808,14 @@ class Game:
     def setup_game(self):
         self.load_assets() # アセットの読み込みをここで行う
 
-        # サンプルノードの追加
-        self.graph.add_node(Node(1, 100, 100, 'warehouse'))
-        self.graph.add_node(Node(2, 300, 150, 'customer'))
-        self.graph.add_node(Node(3, 200, 300, 'customer'))
-        self.graph.add_node(Node(4, 450, 250, 'city'))
-        self.graph.add_node(Node(5, 600, 100, 'customer'))
-        self.graph.add_node(Node(6, 700, 300, 'city'))
-        self.graph.add_node(Node(7, 500, 400, 'customer'))
-        self.graph.add_node(Node(8, 800, 150, 'customer'))
-        self.graph.add_node(Node(9, 900, 400, 'customer'))
-        self.graph.add_node(Node(10, 1050, 250, 'city'))
-
-        # サンプルエッジの追加 (距離は適当に計算)
-        node_ids = list(self.graph.nodes.keys())
-        connections = set()
-        all_edges = []  # 全てのエッジを一時的に保存
+        # グラフをクリア（再生成時のため）
+        self.graph = Graph()
         
-        # すべての可能なエッジを生成
-        for i in range(len(node_ids)):
-            for j in range(i + 1, len(node_ids)):
-                n1_id = node_ids[i]
-                n2_id = node_ids[j]
-                node1 = self.graph.nodes[n1_id]
-                node2 = self.graph.nodes[n2_id]
-                distance = ((node1.x - node2.x)**2 + (node1.y - node2.y)**2)**0.5
-                all_edges.append((n1_id, n2_id, distance))
+        # ランダムノード生成
+        self.generate_random_nodes()
         
-        # 距離でソートして、短いエッジを優先
-        all_edges.sort(key=lambda x: x[2])
-        
-        # 各ノードから最低2つのエッジを確保し、全体で適度な数に制限
-        edge_count_per_node = {node_id: 0 for node_id in node_ids}
-        selected_edges = []
-        
-        for n1_id, n2_id, distance in all_edges:
-            # 各ノードが最低2つの接続を持つか、全体のエッジ数が制限以下の場合に追加
-            if (edge_count_per_node[n1_id] < 3 or edge_count_per_node[n2_id] < 3) and len(selected_edges) < 15:
-                selected_edges.append((n1_id, n2_id, distance))
-                edge_count_per_node[n1_id] += 1
-                edge_count_per_node[n2_id] += 1
-        
-        # 選択されたエッジをグラフに追加
-        for n1_id, n2_id, distance in selected_edges:
-            self.graph.add_edge(n1_id, n2_id, distance)
+        # ランダムエッジ生成
+        self.generate_random_edges()
 
         warehouse_node = None
         for node in self.graph.nodes.values():
@@ -478,48 +824,52 @@ class Game:
                 break
         
         if warehouse_node:
-            self.vehicles.append(Vehicle(101, warehouse_node, vehicle_image=self.vehicle_image)) # 画像を渡す
-        else:
-            print("Warning: No warehouse node found. Vehicle starting at node 1 (if exists).")
-            if 1 in self.graph.nodes:
-                self.vehicles.append(Vehicle(101, self.graph.nodes[1], vehicle_image=self.vehicle_image))
+            # 既存の車両がある場合は更新、なければ新規作成
+            if self.vehicles:
+                self.vehicles[0].current_node = warehouse_node
+                self.vehicles[0].x = warehouse_node.x
+                self.vehicles[0].y = warehouse_node.y
+                self.vehicles[0].fuel = INITIAL_FUEL
+                self.vehicles[0].is_moving = False
+                self.vehicles[0].path_nodes_ids = []
+                self.vehicles[0].path_index = 0
+                self.vehicles[0].out_of_fuel = False
+                self.vehicles[0].selected_nodes = []
+                # スコアは引き継ぐので変更しない
             else:
-                print("Error: No nodes available to place vehicle.")
+                self.vehicles.append(Vehicle(101, warehouse_node, vehicle_image=self.vehicle_image))
+            
+            # ゲーム開始時に車両の現在位置を選択状態にする
+            self.route_planning_nodes = [warehouse_node.id]
+            warehouse_node.is_selected = True
+            self.selected_node = warehouse_node
+        else:
+            print("Error: No warehouse node found.")
 
         global game_graph
         game_graph = self.graph
 
     def handle_input(self, event):
         if event.type == pygame.KEYDOWN and event.key == pygame.K_r:
+            # 完全リセット：日数とスコアをリセットし、新しいマップを生成
+            print("ゲームを完全リセットします。")
             self.game_state = 'PLANNING'
-            for node in self.graph.nodes.values():
-                node.is_selected = False
-                node.visited = False  # 訪問状態をリセット
-                self.route_planning_nodes = []
-                self.selected_node = None
-                for edge in self.graph.edges:
-                    edge.is_highlighted = False
-                if self.vehicles:
-                    warehouse_node = None
-                    for node in self.graph.nodes.values():
-                        if node.type == 'warehouse':
-                            warehouse_node = node
-                            break
-                    if warehouse_node:
-                        self.vehicles[0].current_node = warehouse_node
-                        self.vehicles[0].x = warehouse_node.x
-                        self.vehicles[0].y = warehouse_node.y
-                        self.vehicles[0].is_moving = False                           
-                        self.vehicles[0].path_nodes_ids = []
-                        self.vehicles[0].path_index = 0
-                        self.vehicles[0].current_highlighted_edge = None
-                        # 燃料をリセット
-                        self.vehicles[0].fuel = INITIAL_FUEL
-                        self.vehicles[0].out_of_fuel = False
-                        # スコアをリセット
-                        self.vehicles[0].score = 0
-                        self.vehicles[0].selected_nodes = []
-                        print("ゲームリセット！プランニングモードに戻ります。")
+            self.current_hour = self.start_hour
+            self.current_day = 1
+            self.cumulative_score = 0
+            self.gasstation_used = False
+            
+            # 固定ノード位置をリセット（次回は新しいランダム位置で生成）
+            self.fixed_node_positions = None
+            
+            # 新しいマップを生成
+            self.setup_game()
+            
+            # 車両のスコアをリセット
+            if self.vehicles:
+                self.vehicles[0].score = 0
+            
+            print("新しいマップを生成しました。プランニングモードに戻ります。")
                         
         if self.game_state == 'PLANNING':
             if event.type == pygame.MOUSEBUTTONDOWN:
@@ -584,20 +934,24 @@ class Game:
             for vehicle in self.vehicles:
                 vehicle.update()
             
+            # 車両が燃料不足で動けなくなった場合の即座のチェック
+            if any(v.out_of_fuel for v in self.vehicles):
+                print("燃料切れのため配送が中断されました。")
+                if self.vehicles:
+                    final_score = self.vehicles[0].score
+                    self.add_score_to_ranking(final_score)
+                self.game_state = 'RESULTS'
+                return
+            
             all_vehicles_idle = all(not v.is_moving for v in self.vehicles)
             if all_vehicles_idle:
-                if any(v.out_of_fuel for v in self.vehicles):
-                    print("燃料切れのため配送が中断されました。")
+                # 全ノード訪問チェック（customer と city のみ）
+                if self.check_all_nodes_visited():
+                    print("全ノード配達完了！次の日に進みます。")
+                    self.continue_to_next_day()
                 else:
                     print("配送完了！")
-                     # ゲーム終了時の燃料ボーナス計算
-                    ##for vehicle in self.vehicles:
-                    ##    fuel_saved = max(0, vehicle.fuel)
-                    ##    fuel_bonus = int(fuel_saved)
-                    ##    vehicle.score += fuel_bonus
-                    ##   print(f"燃料ボーナス: +{fuel_bonus}点 (残り燃料: {int(fuel_saved)})")
-                    ##    print(f"最終スコア: {vehicle.score}点")
-                self.game_state = 'RESULTS'
+                    self.game_state = 'RESULTS'
 
     def draw(self):
         self.screen.fill(WHITE)
@@ -656,11 +1010,20 @@ class Game:
         state_text = self.font.render(f"State: {self.game_state}", True, BLACK)
         self.screen.blit(state_text, (10, 10))
         
+        # 日数と現在時刻を画面右上に表示
+        day_time_text = self.font.render(f"day {self.current_day} {self.current_hour}:00", True, BLACK)
+        day_time_rect = day_time_text.get_rect()
+        day_time_rect.topright = (SCREEN_WIDTH - 600, 10)
+        self.screen.blit(day_time_text, day_time_rect)
+        
         # スコア表示
         if self.vehicles:
             vehicle = self.vehicles[0]
             score_text = self.font.render(f"Score: {vehicle.score}", True, BLACK)
             self.screen.blit(score_text, (10, 200))
+        
+        # ランキング表示（画面右上）
+        self.draw_ranking()
         
         # 燃料情報を表示
         if self.vehicles:
@@ -696,12 +1059,34 @@ class Game:
             help_text_2 = self.font.render("Press SPACE to start delivery. Press R to Reset.", True, BLACK)
             self.screen.blit(help_text_1, (10, 50))
             self.screen.blit(help_text_2, (10, 90))
+            
+            # 燃料不足の警告表示
+            if self.vehicles and self.vehicles[0].check_if_stranded():
+                warning_text = self.font.render("WARNING: Not enough fuel to move!", True, RED)
+                self.screen.blit(warning_text, (10, 240))
+                warning_text2 = self.font.render("Press R to reset and get more fuel.", True, RED)
+                self.screen.blit(warning_text2, (10, 270))
         elif self.game_state == 'DELIVERING':
             delivering_text = self.font.render("Delivering... Please wait.", True, BLACK)
             self.screen.blit(delivering_text, (10, 50))
         elif self.game_state == 'RESULTS':
             if self.vehicles and not self.vehicles[0].out_of_fuel:
                 self.game_state = 'PLANNING'
+                
+                # 全ノードの選択状態をリセット
+                for node in self.graph.nodes.values():
+                    node.is_selected = False
+                
+                # 車両の現在位置を選択状態にする
+                current_node = self.vehicles[0].current_node
+                if current_node:
+                    self.route_planning_nodes = [current_node.id]
+                    current_node.is_selected = True
+                    self.selected_node = current_node
+                else:
+                    self.route_planning_nodes = []
+                    self.selected_node = None
+                
                 return  # ここで早期リターンして描画をスキップ
             else:
                 vehicle = self.vehicles[0] if self.vehicles else None
@@ -710,6 +1095,35 @@ class Game:
                 self.screen.blit(results_text, (SCREEN_WIDTH // 2 - results_text.get_width() // 2, SCREEN_HEIGHT // 2))
                 reset_prompt = self.font.render("Press R to play again.", True, GREEN)
                 self.screen.blit(reset_prompt, (SCREEN_WIDTH // 2 - reset_prompt.get_width() // 2, SCREEN_HEIGHT // 2 + 40))
+
+    def draw_ranking(self):
+        """ランキングを画面右上に表示する"""
+        if not self.high_scores:
+            return
+        
+        # ランキング表示の位置設定
+        ranking_x = SCREEN_WIDTH - 250
+        ranking_y = 10
+        
+        # タイトル表示
+        ranking_font = pygame.font.Font(None, 28)
+        title_text = ranking_font.render("HIGH SCORES", True, BLACK)
+        self.screen.blit(title_text, (ranking_x, ranking_y))
+        
+        # ランキング背景の描画
+        ranking_height = len(self.high_scores) * 25 + 40
+        pygame.draw.rect(self.screen, (240, 240, 240), 
+                        (ranking_x - 10, ranking_y - 5, 240, ranking_height), 0)
+        pygame.draw.rect(self.screen, BLACK, 
+                        (ranking_x - 10, ranking_y - 5, 240, ranking_height), 2)
+        
+        # 各スコアを表示
+        score_font = pygame.font.Font(None, 24)
+        for i, score in enumerate(self.high_scores):
+            rank = i + 1
+            score_text = score_font.render(f"{rank:2d}. {score:4d} pts", True, BLACK)
+            y_pos = ranking_y + 30 + i * 25
+            self.screen.blit(score_text, (ranking_x, y_pos))
 
     def run(self):
         running = True
